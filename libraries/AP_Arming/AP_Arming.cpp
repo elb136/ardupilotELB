@@ -19,6 +19,7 @@
 
 #include "AP_Arming.h"
 #include <AP_HAL/AP_HAL.h>
+#include <AP_RCProtocol/AP_RCProtocol_config.h>
 #include <AP_BoardConfig/AP_BoardConfig.h>
 #include <AP_BattMonitor/AP_BattMonitor.h>
 #include <AP_Compass/AP_Compass.h>
@@ -1638,8 +1639,14 @@ bool AP_Arming::opendroneid_checks(bool display_failure)
 //Check for multiple RC in serial protocols
 bool AP_Arming::serial_protocol_checks(bool display_failure)
 {
-    if (AP::serialmanager().have_serial(AP_SerialManager::SerialProtocol_RCIN, 1)) {
-       check_failed(display_failure, "Multiple SERIAL ports configured for RC input");
+#if AP_RCPROTOCOL_UART_SWITCH_ENABLED
+    // two RCIN ports are allowed, selected with RCx_OPTION=199
+    const uint8_t max_rcin_instance = 2;
+#else
+    const uint8_t max_rcin_instance = 1;
+#endif
+    if (AP::serialmanager().have_serial(AP_SerialManager::SerialProtocol_RCIN, max_rcin_instance)) {
+       check_failed(display_failure, "Too many SERIAL ports configured for RC input");
        return false;
     }
     char failure_msg[100] = {};

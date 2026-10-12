@@ -26,6 +26,7 @@
 #include <AP_VideoTX/AP_VideoTX_config.h>
 #include <AP_Arming/AP_Arming_config.h>
 #include <AP_BattMonitor/AP_BattMonitor_config.h>
+#include <AP_RCProtocol/AP_RCProtocol_config.h>
 
 #define NUM_RC_CHANNELS 16
 
@@ -372,6 +373,9 @@ public:
 #if AP_MOUNT_POI_LOCK_ENABLED
         MOUNT_POI_LOCK =     186,  // Lock mount target to current ROI seen and switch mount to GPS Targeting mode
 #endif  // AP_MOUNT_POI_LOCK_ENABLED
+#if AP_RCPROTOCOL_UART_SWITCH_ENABLED
+        RCIN_PORT_SELECT =   199,  // select RC input serial port: low = first SERIALn_PROTOCOL=23 port, high = second
+#endif
         // inputs from 200 will eventually used to replace RCMAP
         ROLL =               201, // roll input
         PITCH =              202, // pitch input

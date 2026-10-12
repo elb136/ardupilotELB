@@ -356,11 +356,105 @@ static const AP_RCProtocol::SerialConfig serial_configs[] {
 
 static_assert(ARRAY_SIZE(serial_configs) > 0, "must have at least one serial config");
 
+#if AP_RCPROTOCOL_UART_SWITCH_ENABLED
+// ignore switch requests for this long after a switch, so a second
+// transmitter with the select channel in the other position can't
+// immediately bounce the input back
+#define RCIN_SWITCH_HOLDOFF_MS 1000
+// revert to the previous port if the new one gives no RC frame in this time
+#define RCIN_SWITCH_VERIFY_MS 300
+
+/*
+  called from main thread (aux switch). The actual switch happens in
+  the RC input thread, which owns the uarts.
+ */
+bool AP_RCProtocol::request_uart(uint8_t idx)
+{
+    if (idx >= added.num_uarts) {
+        GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "RCIN: input %u not configured", unsigned(idx+1));
+        return false;
+    }
+    const uint32_t last_switch_ms = added.switch_ms;
+    if (last_switch_ms != 0 && AP_HAL::millis() - last_switch_ms < RCIN_SWITCH_HOLDOFF_MS) {
+        GCS_SEND_TEXT(MAV_SEVERITY_INFO, "RCIN: switch ignored (holdoff)");
+        return false;
+    }
+    added.requested = int8_t(idx);
+    return true;
+}
+
+void AP_RCProtocol::switch_uart(uint8_t idx, uint32_t now_ms)
+{
+    added.previous = added.active;
+    added.active = idx;
+    added.uart = added.uarts[idx];
+
+    // open the new port with the serial config that was working on the
+    // old one, so no re-detection pass is needed
+    serial_configs[added.config_num].apply_to_uart(added.uart);
+    added.opened = true;
+    added.last_config_change_ms = now_ms;
+    if (_detected_protocol != AP_RCProtocol::NONE && backend[_detected_protocol] != nullptr) {
+        // protocol specific bootstrap, e.g. ELRS 420kbaud
+        backend[_detected_protocol]->process_handshake(serial_configs[added.config_num].baud);
+    }
+    // drop anything buffered while this port was inactive, it is stale
+    added.uart->discard_input();
+
+    added.switch_ms = now_ms;
+}
+
+void AP_RCProtocol::check_uart_switch(void)
+{
+    const uint32_t now_ms = AP_HAL::millis();
+    if (!added.standby_opened) {
+        // open standby ports from this thread so they are ready to switch to
+        added.standby_opened = true;
+        for (uint8_t i = 0; i < added.num_uarts; i++) {
+            if (i != added.active) {
+                serial_configs[added.config_num].apply_to_uart(added.uarts[i]);
+            }
+        }
+    }
+    const int8_t req = added.requested;
+    if (req >= 0) {
+        added.requested = -1;
+        if (uint8_t(req) < added.num_uarts && uint8_t(req) != added.active) {
+            switch_uart(uint8_t(req), now_ms);
+            added.verify_switch = true;
+            GCS_SEND_TEXT(MAV_SEVERITY_INFO, "RCIN: switched to input %u", unsigned(added.active+1));
+        }
+    }
+
+    if (!added.verify_switch) {
+        return;
+    }
+    if (int32_t(_last_input_ms - added.switch_ms) > 0) {
+        // new receiver is delivering RC frames
+        added.verify_switch = false;
+        return;
+    }
+    if (now_ms - added.switch_ms > RCIN_SWITCH_VERIFY_MS) {
+        // nothing from the new receiver, go back before RC failsafe triggers
+        const uint8_t bad = added.active;
+        switch_uart(added.previous, now_ms);
+        added.verify_switch = false;
+        GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "RCIN: input %u no signal, back to %u",
+                      unsigned(bad+1), unsigned(added.active+1));
+    }
+}
+#endif  // AP_RCPROTOCOL_UART_SWITCH_ENABLED
+
 void AP_RCProtocol::check_added_uart(void)
 {
     if (!added.uart) {
         return;
     }
+#if AP_RCPROTOCOL_UART_SWITCH_ENABLED
+    if (added.num_uarts > 1) {
+        check_uart_switch();
+    }
+#endif
     uint32_t now = AP_HAL::millis();
     bool searching = should_search(now);
     if (!searching && !_detected_with_bytes) {
@@ -715,6 +809,18 @@ const char *AP_RCProtocol::protocol_name_from_protocol(rcprotocol_t protocol)
  */
 void AP_RCProtocol::add_uart(AP_HAL::UARTDriver* uart)
 {
+#if AP_RCPROTOCOL_UART_SWITCH_ENABLED
+    if (!can_add_uart()) {
+        return;
+    }
+    uart->set_flow_control(AP_HAL::UARTDriver::FLOW_CONTROL_DISABLE);
+    added.uarts[added.num_uarts++] = uart;
+    if (added.uart != nullptr) {
+        // additional port, stays idle until selected
+        return;
+    }
+    added.active = added.num_uarts - 1;
+#endif
     added.uart = uart;
     added.uart->set_flow_control(AP_HAL::UARTDriver::FLOW_CONTROL_DISABLE);
 }

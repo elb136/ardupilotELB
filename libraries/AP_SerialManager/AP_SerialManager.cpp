@@ -534,7 +534,7 @@ void AP_SerialManager::init()
 
 #if AP_RCPROTOCOL_ENABLED
                 case SerialProtocol_RCIN:
-                    if (!AP::RC().has_uart()) {
+                    if (AP::RC().can_add_uart()) {
                         AP::RC().add_uart(uart);
                     } else {
                         GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "SERIAL%u_PROTOCOL: duplicate RCIN not permitted", i);

@@ -61,6 +61,7 @@ extern const AP_HAL::HAL& hal;
 #include <AP_Vehicle/AP_Vehicle_Type.h>
 #include <AP_Parachute/AP_Parachute_config.h>
 #include <AP_Scripting/AP_Scripting.h>
+#include <AP_RCProtocol/AP_RCProtocol.h>
 #define SWITCH_DEBOUNCE_TIME_MS  200
 
 const AP_Param::GroupInfo RC_Channel::var_info[] = {
@@ -252,6 +253,7 @@ const AP_Param::GroupInfo RC_Channel::var_info[] = {
     // @Values{Plane}: 184: System ID Chirp
     // @Values{Copter, Rover, Plane, Blimp, Sub}:  185:Mount Roll/Pitch Lock
     // @Values{Copter, Rover, Plane, Blimp, Sub}:  186:Mount POI Lock
+    // @Values{Copter, Rover, Plane, Blimp}: 199:RC input serial port select
     // @Values{Rover}: 201:Roll
     // @Values{Rover}: 202:Pitch
     // @Values{Rover}: 207:MainSail
@@ -762,6 +764,10 @@ void RC_Channel::init_aux_function(const AUX_FUNC ch_option, const AuxSwitchPos 
 #if HAL_GENERATOR_ENABLED
     case AUX_FUNC::LOWEHEISER_THROTTLE:
 #endif
+#if AP_RCPROTOCOL_UART_SWITCH_ENABLED
+    // always boot on the first RCIN port, only act on switch changes
+    case AUX_FUNC::RCIN_PORT_SELECT:
+#endif
         break;
 
     // these functions require explicit initialization
@@ -940,6 +946,9 @@ const RC_Channel::LookupTable RC_Channel::lookuptable[] = {
 #endif
 #if HAL_MOUNT_ENABLED
     { AUX_FUNC::MOUNT_LRF_ENABLE, "Mount LRF Enable"},
+#endif
+#if AP_RCPROTOCOL_UART_SWITCH_ENABLED
+    { AUX_FUNC::RCIN_PORT_SELECT, "RCIN Port Select"},
 #endif
 };
 
@@ -2006,6 +2015,21 @@ bool RC_Channel::do_aux_function(const AuxFuncTrigger &trigger)
     case AUX_FUNC::LOWEHEISER_THROTTLE:
     case AUX_FUNC::LOWEHEISER_STARTER:
         // monitored by the library itself
+        break;
+#endif
+
+#if AP_RCPROTOCOL_UART_SWITCH_ENABLED
+    case AUX_FUNC::RCIN_PORT_SELECT:
+        switch (ch_flag) {
+        case AuxSwitchPos::LOW:
+            AP::RC().request_uart(0);
+            break;
+        case AuxSwitchPos::MIDDLE:
+            break;
+        case AuxSwitchPos::HIGH:
+            AP::RC().request_uart(1);
+            break;
+        }
         break;
 #endif
 

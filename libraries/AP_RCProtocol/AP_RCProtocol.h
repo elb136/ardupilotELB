@@ -243,6 +243,15 @@ public:
     // add a UART for RCIN
     void add_uart(AP_HAL::UARTDriver* uart);
     bool has_uart() const { return added.uart != nullptr; }
+#if AP_RCPROTOCOL_UART_SWITCH_ENABLED
+    // true if another RCIN uart can be registered
+    bool can_add_uart() const { return added.num_uarts < ARRAY_SIZE(added.uarts); }
+    // request RC input to be taken from RCIN uart idx (0 = lowest SERIALn
+    // with protocol 23, 1 = next). Applied by the RC input thread.
+    bool request_uart(uint8_t idx);
+#else
+    bool can_add_uart() const { return !has_uart(); }
+#endif
 
     // set allowed RC protocols
     void set_rc_protocols(uint32_t mask) {
@@ -307,7 +316,22 @@ private:
         bool opened;
         uint32_t last_config_change_ms;
         uint8_t config_num;
+#if AP_RCPROTOCOL_UART_SWITCH_ENABLED
+        AP_HAL::UARTDriver *uarts[2];
+        uint8_t num_uarts;
+        uint8_t active;              // index into uarts[] currently feeding RC
+        uint8_t previous;            // index to revert to if the new one is silent
+        volatile int8_t requested = -1;
+        volatile uint32_t switch_ms; // time of last switch
+        bool verify_switch;          // waiting for first frame after a switch
+        bool standby_opened;
+#endif
     } added;
+
+#if AP_RCPROTOCOL_UART_SWITCH_ENABLED
+    void check_uart_switch(void);
+    void switch_uart(uint8_t idx, uint32_t now_ms);
+#endif
 
     // allowed RC protocols mask (first bit means "all")
     uint32_t rc_protocols_mask;
