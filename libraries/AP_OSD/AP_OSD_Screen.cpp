@@ -42,6 +42,7 @@
 #include <AP_VideoTX/AP_VideoTX.h>
 #include <AP_Terrain/AP_Terrain.h>
 #include <AP_RangeFinder/AP_RangeFinder.h>
+#include <AP_OpticalFlow/AP_OpticalFlow.h>
 #include <AP_Vehicle/AP_Vehicle.h>
 #include <AP_RPM/AP_RPM.h>
 #include <AP_MSP/AP_MSP.h>
@@ -1172,6 +1173,24 @@ const AP_Param::GroupInfo AP_OSD_Screen::var_info2[] = {
     // @Description: Index of the ESC to use for displaying ESC information. 0 means use the ESC with the highest value.
     // @Range: 0 32
     AP_GROUPINFO("ESC_IDX", 10, AP_OSD_Screen, esc_index, 0),
+#endif
+
+#if AP_OPTICALFLOW_ENABLED
+    // @Param: FLOWQ_EN
+    // @DisplayName: FLOWQ_EN
+    // @Description: Displays optical flow sensor surface quality (0 to 255). Shows --- if the sensor is not healthy
+    // @Values: 0:Disabled,1:Enabled
+
+    // @Param: FLOWQ_X
+    // @DisplayName: FLOWQ_X
+    // @Description: Horizontal position on screen
+    // @Range: 0 59
+
+    // @Param: FLOWQ_Y
+    // @DisplayName: FLOWQ_Y
+    // @Description: Vertical position on screen
+    // @Range: 0 21
+    AP_SUBGROUPINFO(flow_quality, "FLOWQ", 30, AP_OSD_Screen, AP_OSD_Setting),
 #endif
 
     AP_GROUPEND
@@ -2548,6 +2567,23 @@ void AP_OSD_Screen::draw_rngf(uint8_t x, uint8_t y)
 }
 #endif
 
+#if AP_OPTICALFLOW_ENABLED
+void AP_OSD_Screen::draw_flow_quality(uint8_t x, uint8_t y)
+{
+    const AP_OpticalFlow *flow = AP::opticalflow();
+    if (flow == nullptr || !flow->enabled()) {
+        return;
+    }
+    if (!flow->healthy()) {
+        backend->write(x, y, false, "FQ---");
+        return;
+    }
+    const uint8_t quality = flow->quality();
+    // blink at zero quality, which the EKF rejects
+    backend->write(x, y, quality == 0, "FQ%3u", unsigned(quality));
+}
+#endif
+
 #define DRAW_SETTING(n) if (n.enabled) draw_ ## n(n.xpos, n.ypos)
 
 #if HAL_WITH_OSD_BITMAP || HAL_WITH_MSP_DISPLAYPORT
@@ -2574,6 +2610,9 @@ void AP_OSD_Screen::draw(void)
 
 #if AP_RANGEFINDER_ENABLED
     DRAW_SETTING(rngf);
+#endif
+#if AP_OPTICALFLOW_ENABLED
+    DRAW_SETTING(flow_quality);
 #endif
     DRAW_SETTING(waypoint);
     DRAW_SETTING(xtrack_error);

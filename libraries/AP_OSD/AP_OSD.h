@@ -34,6 +34,7 @@
 #endif
 #include <AC_Fence/AC_Fence_config.h>
 #include <AP_RangeFinder/AP_RangeFinder_config.h>
+#include <AP_OpticalFlow/AP_OpticalFlow_config.h>
 
 class AP_OSD_Backend;
 class AP_MSP;
@@ -232,6 +233,9 @@ private:
     AP_OSD_Setting hgt_abvterr{false, 23, 7};
     AP_OSD_Setting fence{false, 14, 9};
     AP_OSD_Setting rngf;
+#if AP_OPTICALFLOW_ENABLED
+    AP_OSD_Setting flow_quality{false, 1, 3};
+#endif
 #if HAL_PLUSCODE_ENABLE
     AP_OSD_Setting pluscode;
 #endif
@@ -337,6 +341,9 @@ private:
 #endif
 #if AP_RANGEFINDER_ENABLED
     void draw_rngf(uint8_t x, uint8_t y);
+#endif
+#if AP_OPTICALFLOW_ENABLED
+    void draw_flow_quality(uint8_t x, uint8_t y);
 #endif
 
 #if AP_OSD_EXTENDED_LNK_STATS
