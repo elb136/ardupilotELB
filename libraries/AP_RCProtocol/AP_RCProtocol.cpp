@@ -42,6 +42,7 @@
 #include "AP_RCProtocol_FDM.h"
 #include "AP_RCProtocol_Radio.h"
 #include <AP_Math/AP_Math.h>
+#include <AP_Math/crc.h>
 #include <RC_Channel/RC_Channel.h>
 
 #include <AP_Vehicle/AP_Vehicle_Type.h>
@@ -357,12 +358,18 @@ static const AP_RCProtocol::SerialConfig serial_configs[] {
 static_assert(ARRAY_SIZE(serial_configs) > 0, "must have at least one serial config");
 
 #if AP_RCPROTOCOL_UART_SWITCH_ENABLED
-// ignore switch requests for this long after a switch, so a second
+// ignore aux switch requests for this long after a switch, so a second
 // transmitter with the select channel in the other position can't
 // immediately bounce the input back
 #define RCIN_SWITCH_HOLDOFF_MS 1000
-// revert to the previous port if the new one gives no RC frame in this time
+// revert to the previous port if a manually selected port gives no RC frame in this time
 #define RCIN_SWITCH_VERIFY_MS 300
+// active port declared lost after this long without RC frames
+#define RCIN_FAILOVER_LOST_MS 200
+// standby port considered alive if it gave a valid RC frame within this time
+#define RCIN_STANDBY_ALIVE_MS 150
+// a recovered link must be continuously valid this long to unlock the aux switch
+#define RCIN_RECOVERED_STABLE_MS 1000
 
 /*
   called from main thread (aux switch). The actual switch happens in
@@ -374,6 +381,12 @@ bool AP_RCProtocol::request_uart(uint8_t idx)
         GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "RCIN: input %u not configured", unsigned(idx+1));
         return false;
     }
+    // remember the switch position, applied when a failover ends
+    added.desired = idx;
+    if (added.failover) {
+        GCS_SEND_TEXT(MAV_SEVERITY_INFO, "RCIN: switch locked (failover)");
+        return false;
+    }
     const uint32_t last_switch_ms = added.switch_ms;
     if (last_switch_ms != 0 && AP_HAL::millis() - last_switch_ms < RCIN_SWITCH_HOLDOFF_MS) {
         GCS_SEND_TEXT(MAV_SEVERITY_INFO, "RCIN: switch ignored (holdoff)");
@@ -383,23 +396,119 @@ bool AP_RCProtocol::request_uart(uint8_t idx)
     return true;
 }
 
+// baud rate the RC uarts run at for the detected protocol
+uint32_t AP_RCProtocol::get_standby_baud(void) const
+{
+    uint32_t baud = serial_configs[added.config_num].baud;
+#if AP_RCPROTOCOL_CRSF_ENABLED
+    const AP_RCProtocol_CRSF *crsf = AP_RCProtocol_CRSF::get_singleton();
+    if (crsf != nullptr && baud == CRSF_BAUDRATE) {
+        // ELRS 420kbaud option
+        baud = crsf->get_bootstrap_baud_rate();
+    }
+#endif
+    return baud;
+}
+
+void AP_RCProtocol::open_standby(uint8_t idx, uint32_t baud)
+{
+    AP_HAL::UARTDriver *uart = added.uarts[idx];
+    serial_configs[added.config_num].apply_to_uart(uart);
+    if (uart->get_baud_rate() != baud) {
+        uart->begin(baud);
+    }
+    uart->discard_input();
+    StandbyMonitor &mon = standby_mon[idx];
+    mon.ofs = 0;
+    mon.last_valid_ms = 0;
+    mon.valid_since_ms = 0;
+}
+
+/*
+  parse the standby receiver's byte stream just enough to know if it is
+  delivering valid CRSF RC frames. For other protocols any data counts as
+  a live link (receivers must be set to "no pulses" on failsafe)
+ */
+void AP_RCProtocol::monitor_standby(uint8_t idx, uint32_t now_ms)
+{
+    AP_HAL::UARTDriver *uart = added.uarts[idx];
+    StandbyMonitor &mon = standby_mon[idx];
+    bool got_frame = false;
+    uint32_t n = MIN(uart->available(), 255U);
+    while (n--) {
+        const int16_t b = uart->read();
+        if (b < 0) {
+            break;
+        }
+#if AP_RCPROTOCOL_CRSF_ENABLED
+        if (_detected_protocol == AP_RCProtocol::CRSF) {
+            if (mon.ofs == 0 && b != 0xC8) {
+                // wait for flight controller address
+                continue;
+            }
+            mon.buf[mon.ofs++] = uint8_t(b);
+            if (mon.ofs < 2) {
+                continue;
+            }
+            const uint8_t len = mon.buf[1];
+            if (len < 2 || len > sizeof(mon.buf) - 2) {
+                mon.ofs = 0;
+                continue;
+            }
+            if (mon.ofs < len + 2) {
+                continue;
+            }
+            const uint8_t type = mon.buf[2];
+            const uint8_t crc = crc8_dvb_s2_update(0, &mon.buf[2], len - 1);
+            // RC_CHANNELS_PACKED or SUBSET_RC_CHANNELS_PACKED
+            if (crc == mon.buf[len + 1] && (type == 0x16 || type == 0x17)) {
+                got_frame = true;
+            }
+            mon.ofs = 0;
+            continue;
+        }
+#endif
+        got_frame = true;
+    }
+    if (got_frame) {
+        if (mon.valid_since_ms == 0 || now_ms - mon.last_valid_ms > RCIN_STANDBY_ALIVE_MS) {
+            mon.valid_since_ms = now_ms;
+        }
+        mon.last_valid_ms = now_ms;
+    }
+}
+
+bool AP_RCProtocol::standby_alive(uint8_t idx, uint32_t now_ms) const
+{
+    const StandbyMonitor &mon = standby_mon[idx];
+    return mon.last_valid_ms != 0 && now_ms - mon.last_valid_ms < RCIN_STANDBY_ALIVE_MS;
+}
+
+bool AP_RCProtocol::standby_stable(uint8_t idx, uint32_t now_ms) const
+{
+    return standby_alive(idx, now_ms) && now_ms - standby_mon[idx].valid_since_ms >= RCIN_RECOVERED_STABLE_MS;
+}
+
 void AP_RCProtocol::switch_uart(uint8_t idx, uint32_t now_ms)
 {
     added.previous = added.active;
     added.active = idx;
     added.uart = added.uarts[idx];
 
-    // open the new port with the serial config that was working on the
-    // old one, so no re-detection pass is needed
+    // new active port: same serial config as the old one, no re-detection
+    const uint32_t baud = get_standby_baud();
     serial_configs[added.config_num].apply_to_uart(added.uart);
+    if (added.uart->get_baud_rate() != baud) {
+        added.uart->begin(baud);
+    }
     added.opened = true;
     added.last_config_change_ms = now_ms;
-    if (_detected_protocol != AP_RCProtocol::NONE && backend[_detected_protocol] != nullptr) {
-        // protocol specific bootstrap, e.g. ELRS 420kbaud
-        backend[_detected_protocol]->process_handshake(serial_configs[added.config_num].baud);
-    }
-    // drop anything buffered while this port was inactive, it is stale
+    // the monitor has been draining this port, drop any partial frame
     added.uart->discard_input();
+
+    // old active port becomes standby and is monitored from now on
+    open_standby(added.previous, baud);
+    added.standby_baud = baud;
 
     added.switch_ms = now_ms;
 }
@@ -407,22 +516,58 @@ void AP_RCProtocol::switch_uart(uint8_t idx, uint32_t now_ms)
 void AP_RCProtocol::check_uart_switch(void)
 {
     const uint32_t now_ms = AP_HAL::millis();
-    if (!added.standby_opened) {
-        // open standby ports from this thread so they are ready to switch to
-        added.standby_opened = true;
-        for (uint8_t i = 0; i < added.num_uarts; i++) {
-            if (i != added.active) {
-                serial_configs[added.config_num].apply_to_uart(added.uarts[i]);
-            }
-        }
+    if (_detected_protocol == AP_RCProtocol::NONE || !_detected_with_bytes) {
+        // nothing to compare against until the protocol is known
+        return;
     }
+    const uint8_t standby = added.active == 0 ? 1 : 0;
+
+    // keep the standby port at the protocol's baud rate
+    const uint32_t baud = get_standby_baud();
+    if (added.standby_baud != baud) {
+        open_standby(standby, baud);
+        added.standby_baud = baud;
+    }
+    monitor_standby(standby, now_ms);
+
+    const bool active_alive = now_ms - _last_input_ms < RCIN_FAILOVER_LOST_MS;
+
+    // automatic failover: active link lost and the other one is live
+    if (!active_alive && !added.verify_switch &&
+        now_ms - added.switch_ms > RCIN_FAILOVER_LOST_MS &&
+        standby_alive(standby, now_ms)) {
+        const uint8_t lost = added.active;
+        added.requested = -1;
+        switch_uart(standby, now_ms);
+        added.failover = true;
+        GCS_SEND_TEXT(MAV_SEVERITY_CRITICAL, "RCIN: input %u lost, failover to %u",
+                      unsigned(lost+1), unsigned(added.active+1));
+        return;
+    }
+
+    // end of failover: both links up again, give control back to the switch
+    if (added.failover && active_alive && standby_stable(standby, now_ms)) {
+        added.failover = false;
+        GCS_SEND_TEXT(MAV_SEVERITY_INFO, "RCIN: input %u back, switch active", unsigned(standby+1));
+        if (added.desired != added.active) {
+            switch_uart(added.desired, now_ms);
+            GCS_SEND_TEXT(MAV_SEVERITY_INFO, "RCIN: switched to input %u", unsigned(added.active+1));
+        }
+        return;
+    }
+
+    // manual switch from the aux function
     const int8_t req = added.requested;
     if (req >= 0) {
         added.requested = -1;
-        if (uint8_t(req) < added.num_uarts && uint8_t(req) != added.active) {
-            switch_uart(uint8_t(req), now_ms);
-            added.verify_switch = true;
-            GCS_SEND_TEXT(MAV_SEVERITY_INFO, "RCIN: switched to input %u", unsigned(added.active+1));
+        if (!added.failover && uint8_t(req) < added.num_uarts && uint8_t(req) != added.active) {
+            if (!standby_alive(uint8_t(req), now_ms)) {
+                GCS_SEND_TEXT(MAV_SEVERITY_WARNING, "RCIN: input %u no signal, not switching", unsigned(req+1));
+            } else {
+                switch_uart(uint8_t(req), now_ms);
+                added.verify_switch = true;
+                GCS_SEND_TEXT(MAV_SEVERITY_INFO, "RCIN: switched to input %u", unsigned(added.active+1));
+            }
         }
     }
 
@@ -486,6 +631,13 @@ void AP_RCProtocol::check_added_uart(void)
             added.config_num++;
             if (added.config_num >= ARRAY_SIZE(serial_configs)) {
                 added.config_num = 0;
+#if AP_RCPROTOCOL_UART_SWITCH_ENABLED
+                if (added.num_uarts > 1 && _detected_protocol == AP_RCProtocol::NONE) {
+                    // nothing found on this port with any config, try the other one
+                    added.active = added.active == 0 ? 1 : 0;
+                    added.uart = added.uarts[added.active];
+                }
+#endif
             }
             added.opened = false;
         }

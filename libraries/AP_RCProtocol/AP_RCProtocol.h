@@ -321,16 +321,32 @@ private:
         uint8_t num_uarts;
         uint8_t active;              // index into uarts[] currently feeding RC
         uint8_t previous;            // index to revert to if the new one is silent
+        uint8_t desired;             // last port selected by the aux switch
         volatile int8_t requested = -1;
         volatile uint32_t switch_ms; // time of last switch
-        bool verify_switch;          // waiting for first frame after a switch
-        bool standby_opened;
+        bool verify_switch;          // waiting for first frame after a manual switch
+        bool failover;               // automatic switch after link loss, aux switch locked
+        uint32_t standby_baud;       // baud the standby port is opened at
 #endif
     } added;
 
 #if AP_RCPROTOCOL_UART_SWITCH_ENABLED
+    // lightweight monitor of the standby receiver, so we know if it
+    // has a live link before switching to it
+    struct StandbyMonitor {
+        uint8_t buf[64];
+        uint8_t ofs;
+        uint32_t last_valid_ms;      // last valid RC frame
+        uint32_t valid_since_ms;     // start of the current run of valid frames
+    } standby_mon[2];
+
     void check_uart_switch(void);
     void switch_uart(uint8_t idx, uint32_t now_ms);
+    uint32_t get_standby_baud(void) const;
+    void open_standby(uint8_t idx, uint32_t baud);
+    void monitor_standby(uint8_t idx, uint32_t now_ms);
+    bool standby_alive(uint8_t idx, uint32_t now_ms) const;
+    bool standby_stable(uint8_t idx, uint32_t now_ms) const;
 #endif
 
     // allowed RC protocols mask (first bit means "all")
